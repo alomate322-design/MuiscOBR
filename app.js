@@ -11,7 +11,12 @@
 //    через интерфейс. Накладывается поверх BUILTIN_FOLDERS на лету, видно
 //    сразу у всех, кто сейчас в комнате.
 
-import OBR from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/lib/index.js";
+// Важно: не "lib/index.js" напрямую — внутри пакета относительные импорты без
+// расширения ".js" (нормально для сборщиков вроде Vite/Webpack, но браузер
+// при загрузке модуля напрямую с CDN такое не резолвит и всё падает в 404).
+// "+esm" — отдельный режим jsDelivr, который сам собирает пакет в один
+// файл со всеми зависимостями (uuid, immer, js-base64) уже склеенными.
+import OBR from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
 import { BUILTIN_FOLDERS } from "./data.js";
 
 const STATE_KEY = "com.ravenloft.music/state";
