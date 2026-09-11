@@ -209,10 +209,15 @@ function syncStream(streamId) {
     el.loop = stream.loop ?? track.loop;
   }
 
-  if (!audioUnlocked) {
-    applyVolume(el, targetVolume);
-    return;
-  }
+  // Раньше здесь было "if (!audioUnlocked) return" — то есть пока игрок не
+  // кликнет отдельный оверлей "включить звук", код даже не ПЫТАЛСЯ вызвать
+  // el.play() для музыки/эмбиента, только выставлял громкость. Из-за этого
+  // музыка и эмбиент у игроков не звучали никогда, если они этот оверлей не
+  // заметили или не нажали, — а звуковая панель (oneshot, playSfxLocally)
+  // такой проверки не имела вообще и просто пробовала play() напрямую,
+  // поэтому у игроков работала. Теперь ведём себя одинаково для обоих:
+  // всегда пробуем play(), оверлей показываем только если браузер реально
+  // отклонил воспроизведение (см. .catch ниже), а не превентивно.
 
   const startedAt = typeof state.startedAt === "number" ? state.startedAt : Date.now();
   const elapsedSec = Math.max(0, (Date.now() - startedAt) / 1000);
@@ -229,6 +234,10 @@ function syncStream(streamId) {
     applyVolume(el, justStarted && fadeMs > 0 ? 0 : targetVolume);
     el.play()
       .then(() => {
+        // Раз play() реально прошёл — звук у этого клиента точно разрешён
+        // браузером, оверлей больше не нужен (даже если он его не нажимал).
+        audioUnlocked = true;
+        hideUnlockOverlay();
         if (justStarted && fadeMs > 0) fadeVolume(el, streamId, 0, targetVolume, fadeMs);
       })
       .catch((err) => {
