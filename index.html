@@ -16,6 +16,11 @@
     --danger: #b06058;
   }
   * { box-sizing: border-box; }
+  /* Без этого правила элементы, которые JS прячет через .hidden = true
+     (окно "включить звук", кнопка редактирования для не-мастера), не
+     скрываются — конкретные display:flex ниже по файлу имеют такой же
+     приоритет, как встроенное [hidden], и перебивают его. */
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
@@ -259,3 +264,4 @@
   <script type="module" src="./app.js"></script>
 </body>
 </html>
+
