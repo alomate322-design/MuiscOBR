@@ -1,15 +1,15 @@
 {
-  "name": "Ravenloft Music",
-  "version": "1.0.0",
-  "manifest_version": 1,
-  "description": "Синхронизированный музыкальный плеер для кампании Curse of Strahd",
-  "icon": "/icon.svg",
-  "author": "Никита",
-  "action": {
-    "title": "Ravenloft Music",
-    "icon": "/icon.svg",
-    "popover": "/index.html",
-    "width": 740,
-    "height": 640
-  }
+    "name": "Ravenloft Music",
+    "version": "1.0.0",
+    "manifest_version": 1,
+    "description": "Синхронизированный музыкальный плеер для кампании Curse of Strahd",
+    "icon": "icon.svg",
+    "author": "Никита",
+    "action": {
+          "title": "Ravenloft Music",
+          "icon": "icon.svg",
+          "popover": "index.html",
+          "width": 740,
+          "height": 640
+    }
 }
