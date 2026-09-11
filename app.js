@@ -32,8 +32,19 @@ function clamp01(v) {
 }
 
 function toDirectUrl(link) {
-  if (/dropbox\.com/.test(link) && /[?&]dl=0(?:&|$)/.test(link)) {
-    return link.replace("dl=0", "dl=1");
+  // Для <audio> Dropbox должен отдавать файл как содержимое для браузера,
+  // а не как принудительное скачивание. `dl=1` задаёт download-режим,
+  // `raw=1` — прямой render/raw-режим, который корректнее для media element.
+  try {
+    const url = new URL(link);
+    if (url.hostname === "dropbox.com" || url.hostname.endsWith(".dropbox.com")) {
+      url.searchParams.delete("dl");
+      url.searchParams.set("raw", "1");
+      return url.toString();
+    }
+  } catch {
+    // Если это невалидный URL, оставляем как есть — обработчик audio.error
+    // покажет проблему в консоли.
   }
   return link;
 }
@@ -804,3 +815,4 @@ OBR.onReady(async () => {
 
   if (!audioUnlocked) showUnlockOverlay();
 });
+
