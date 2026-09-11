@@ -75,7 +75,17 @@ function normalizeId(stream) {
 function applyOverride(stream) {
   const id = normalizeId(stream);
   const o = library.overrides?.[id];
-  return o ? { ...stream, id, ...o } : { ...stream, id };
+  if (!o) return { ...stream, id };
+  const merged = { ...stream, id, ...o };
+  // "link" не настоящее поле стрима — это правка ссылки первого трека,
+  // храним её отдельно от overrides, а здесь просто подставляем на лету.
+  if (o.link) {
+    merged.tracks = [
+      { ...(stream.tracks[0] || {}), link: o.link, loop: o.loop ?? stream.tracks[0]?.loop },
+    ];
+  }
+  delete merged.link;
+  return merged;
 }
 
 function computeEffectiveFolders() {
@@ -132,15 +142,60 @@ function applyVolume(el, baseVolumePercent) {
   }
 }
 
+// Затухание — только на клиенте, только между "проценты базовой громкости"
+// (0–100), и applyVolume всё равно клэмпит каждый кадр. Именно так не
+// повторяем баг DJinni: там громкость на HTMLMediaElement.volume ставилась
+// напрямую и могла уйти за пределы [0,1] — здесь физически невозможно.
+const fadeAnimations = new Map(); // streamId -> {cancelled}
+const lastPlayingState = new Map(); // streamId -> boolean
+
+function cancelFade(streamId) {
+  const anim = fadeAnimations.get(streamId);
+  if (anim) anim.cancelled = true;
+  fadeAnimations.delete(streamId);
+}
+
+function fadeVolume(el, streamId, fromPercent, toPercent, durationMs, onDone) {
+  cancelFade(streamId);
+  if (!durationMs || durationMs <= 0) {
+    applyVolume(el, toPercent);
+    onDone?.();
+    return;
+  }
+  const token = { cancelled: false };
+  fadeAnimations.set(streamId, token);
+  const start = performance.now();
+  function step(now) {
+    if (token.cancelled) return;
+    const t = Math.min(1, (now - start) / durationMs);
+    applyVolume(el, fromPercent + (toPercent - fromPercent) * t);
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else {
+      fadeAnimations.delete(streamId);
+      onDone?.();
+    }
+  }
+  requestAnimationFrame(step);
+}
+
 function syncStream(streamId) {
   const entry = STREAM_INDEX.get(streamId);
   if (!entry || entry.stream.type !== "loop") return;
   const { stream } = entry;
   const state = roomState.streams?.[streamId];
   const el = getOrCreateAudio(streamId);
+  const wasPlaying = lastPlayingState.get(streamId) ?? false;
+  const targetVolume = state?.volume ?? stream.volume ?? 80;
+  const fadeMs = Math.max(0, Number(stream.fadeMs) || 0);
 
   if (!state || !state.playing) {
-    if (!el.paused) el.pause();
+    if (wasPlaying && !el.paused) {
+      fadeVolume(el, streamId, targetVolume, 0, fadeMs, () => el.pause());
+    } else if (!el.paused) {
+      el.pause();
+    }
+    lastPlayingState.set(streamId, false);
     return;
   }
 
@@ -154,14 +209,16 @@ function syncStream(streamId) {
     el.loop = stream.loop ?? track.loop;
   }
 
-  applyVolume(el, state.volume ?? stream.volume ?? 80);
-
-  if (!audioUnlocked) return;
+  if (!audioUnlocked) {
+    applyVolume(el, targetVolume);
+    return;
+  }
 
   const startedAt = typeof state.startedAt === "number" ? state.startedAt : Date.now();
   const elapsedSec = Math.max(0, (Date.now() - startedAt) / 1000);
   const duration = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null;
   const target = el.loop && duration ? elapsedSec % duration : elapsedSec;
+  const justStarted = !wasPlaying;
 
   if (el.paused) {
     try {
@@ -169,17 +226,27 @@ function syncStream(streamId) {
     } catch {
       /* метаданные ещё не загружены — play() подождёт сам */
     }
-    el.play().catch((err) => {
-      console.warn("[Ravenloft Music] play() отклонён браузером", err);
-      showUnlockOverlay();
-    });
-  } else if (duration && Math.abs(el.currentTime - target) > 1.5) {
-    try {
-      el.currentTime = target;
-    } catch {
-      /* ignore */
+    applyVolume(el, justStarted && fadeMs > 0 ? 0 : targetVolume);
+    el.play()
+      .then(() => {
+        if (justStarted && fadeMs > 0) fadeVolume(el, streamId, 0, targetVolume, fadeMs);
+      })
+      .catch((err) => {
+        console.warn("[Ravenloft Music] play() отклонён браузером", err);
+        showUnlockOverlay();
+      });
+  } else {
+    if (!fadeAnimations.has(streamId)) applyVolume(el, targetVolume);
+    if (duration && Math.abs(el.currentTime - target) > 1.5) {
+      try {
+        el.currentTime = target;
+      } catch {
+        /* ignore */
+      }
     }
   }
+
+  lastPlayingState.set(streamId, true);
 }
 
 function syncAll() {
@@ -248,7 +315,7 @@ async function writeLibrary(next) {
   }
 }
 
-async function addStream(folderId, { name, icon, link, type, loop }) {
+async function addStream(folderId, { name, icon, link, type, loop, fadeMs }) {
   const id = freshId("c");
   const stream = {
     id,
@@ -257,6 +324,7 @@ async function addStream(folderId, { name, icon, link, type, loop }) {
     volume: 80,
     type,
     loop: type === "loop" ? !!loop : undefined,
+    fadeMs: type === "loop" ? Math.max(0, Number(fadeMs) || 0) : 0,
     tracks: [{ name: name || "Без названия", link, loop: !!loop }],
   };
   const isBuiltinFolder = BUILTIN_FOLDERS.some((f) => String(f.id) === String(folderId));
@@ -305,6 +373,7 @@ async function setStreamOverride(streamId, patch) {
 // ---------- UI ----------
 
 const root = document.getElementById("app");
+const nowPlayingRoot = document.getElementById("now-playing");
 const unlockOverlay = document.getElementById("unlock-overlay");
 const editToggleBtn = document.getElementById("edit-toggle");
 
@@ -423,9 +492,14 @@ function toggleInlineEdit(row, folder, stream) {
   iconInput.placeholder = "🎵";
   iconInput.value = stream.icon || "";
 
-  box.append(nameInput, iconInput);
+  const linkInput = el("input", "text-input");
+  linkInput.placeholder = "Ссылка";
+  linkInput.value = stream.tracks[0]?.link || "";
+
+  box.append(nameInput, iconInput, linkInput);
 
   let loopCheckbox;
+  let fadeInput;
   if (stream.type === "loop") {
     const loopLabel = el("label", "checkbox-label");
     loopCheckbox = document.createElement("input");
@@ -433,12 +507,23 @@ function toggleInlineEdit(row, folder, stream) {
     loopCheckbox.checked = !!stream.loop;
     loopLabel.append(loopCheckbox, document.createTextNode(" зациклен"));
     box.appendChild(loopLabel);
+
+    fadeInput = el("input", "text-input fade-input");
+    fadeInput.type = "number";
+    fadeInput.min = "0";
+    fadeInput.step = "500";
+    fadeInput.placeholder = "Затухание, мс";
+    fadeInput.value = String(stream.fadeMs || 0);
+    box.appendChild(fadeInput);
   }
 
   const save = el("button", "small-btn", "Сохранить");
   save.addEventListener("click", async () => {
     const patch = { name: nameInput.value.trim() || stream.name, icon: iconInput.value.trim() };
+    const newLink = linkInput.value.trim();
+    if (newLink && newLink !== stream.tracks[0]?.link) patch.link = newLink;
     if (loopCheckbox) patch.loop = loopCheckbox.checked;
+    if (fadeInput) patch.fadeMs = Math.max(0, Number(fadeInput.value) || 0);
     await setStreamOverride(stream.id, patch);
     box.remove();
   });
@@ -476,6 +561,12 @@ function renderAddStreamForm(folder) {
   loopCheckbox.checked = true;
   loopLabel.append(loopCheckbox, document.createTextNode(" зацикливать проигрывание"));
 
+  const fadeInput = el("input", "text-input fade-input");
+  fadeInput.type = "number";
+  fadeInput.min = "0";
+  fadeInput.step = "500";
+  fadeInput.placeholder = "Затухание, мс (0 = без него)";
+
   const submit = el("button", "small-btn", "Добавить");
   submit.addEventListener("click", async () => {
     if (!linkInput.value.trim()) {
@@ -488,18 +579,21 @@ function renderAddStreamForm(folder) {
       link: linkInput.value.trim(),
       type: typeSelect.value,
       loop: loopCheckbox.checked,
+      fadeMs: fadeInput.value,
     });
     nameInput.value = "";
     iconInput.value = "";
     linkInput.value = "";
+    fadeInput.value = "";
     form.hidden = true;
   });
 
   typeSelect.addEventListener("change", () => {
     loopLabel.hidden = typeSelect.value !== "loop";
+    fadeInput.hidden = typeSelect.value !== "loop";
   });
 
-  form.append(nameInput, iconInput, linkInput, typeSelect, loopLabel, submit);
+  form.append(nameInput, iconInput, linkInput, typeSelect, loopLabel, fadeInput, submit);
   toggle.addEventListener("click", () => {
     form.hidden = !form.hidden;
   });
@@ -552,6 +646,77 @@ function refreshUiFromState() {
     row._playBtn.classList.toggle("is-playing", !!state?.playing);
     if (document.activeElement !== row._volume) {
       row._volume.value = String(state?.volume ?? row._volume.value);
+    }
+  }
+  renderNowPlaying();
+}
+
+// Отдельная панель "сейчас играет" — быстрый доступ ко всему, что реально
+// звучит прямо сейчас, без необходимости разворачивать дерево папок.
+// Строки обновляются на месте (не пересоздаются), иначе перетаскивание
+// ползунка громкости прерывалось бы собственным же эхо через onMetadataChange.
+const nowPlayingRows = new Map(); // streamId -> {row, volume, nameEl}
+
+function renderNowPlaying() {
+  if (!nowPlayingRoot) return;
+
+  const playingIds = new Set();
+  const playingEntries = [];
+  for (const [, entry] of STREAM_INDEX) {
+    if (entry.stream.type !== "loop") continue;
+    if (roomState.streams?.[entry.stream.id]?.playing) {
+      playingIds.add(entry.stream.id);
+      playingEntries.push(entry);
+    }
+  }
+
+  for (const [id, refs] of nowPlayingRows) {
+    if (!playingIds.has(id)) {
+      refs.row.remove();
+      nowPlayingRows.delete(id);
+    }
+  }
+
+  if (playingEntries.length === 0) {
+    if (!nowPlayingRoot.querySelector(".now-playing-empty")) {
+      nowPlayingRoot.innerHTML = "";
+      nowPlayingRoot.appendChild(el("div", "now-playing-empty", "Сейчас тихо"));
+    }
+    return;
+  }
+  nowPlayingRoot.querySelector(".now-playing-empty")?.remove();
+
+  for (const { folder, stream } of playingEntries) {
+    const state = roomState.streams?.[stream.id];
+    let refs = nowPlayingRows.get(stream.id);
+    if (!refs) {
+      const row = el("div", "now-playing-row");
+      const top = el("div", "now-playing-top");
+      top.appendChild(el("span", "now-playing-folder", folder.name));
+      row.appendChild(top);
+      const nameEl = el("div", "now-playing-name");
+      row.appendChild(nameEl);
+
+      const controls = el("div", "now-playing-controls");
+      const stopBtn = el("button", "play-btn is-playing", "⏸");
+      stopBtn.disabled = role !== "GM";
+      stopBtn.addEventListener("click", () => toggleStream(stream.id));
+      const volume = el("input", "vol");
+      volume.type = "range";
+      volume.min = "0";
+      volume.max = "100";
+      volume.disabled = role !== "GM";
+      volume.addEventListener("input", () => setStreamVolume(stream.id, Number(volume.value)));
+      controls.append(stopBtn, volume);
+      row.appendChild(controls);
+
+      nowPlayingRoot.appendChild(row);
+      refs = { row, volume, nameEl };
+      nowPlayingRows.set(stream.id, refs);
+    }
+    refs.nameEl.textContent = `${stream.icon || ""} ${stream.name}`;
+    if (document.activeElement !== refs.volume) {
+      refs.volume.value = String(state?.volume ?? stream.volume ?? 80);
     }
   }
 }
