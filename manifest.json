@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "manifest_version": 1,
   "description": "Синхронизированный музыкальный плеер для кампании Curse of Strahd",
-  "icon": "icon.svg",
+  "icon": "/icon.svg",
   "author": "Никита",
   "action": {
     "title": "Ravenloft Music",
-    "icon": "icon.svg",
-    "popover": "index.html",
+    "icon": "/icon.svg",
+    "popover": "/index.html",
     "width": 420,
     "height": 640
   }
